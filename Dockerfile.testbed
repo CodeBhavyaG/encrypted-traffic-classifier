@@ -1,0 +1,25 @@
+FROM mcr.microsoft.com/playwright/python:v1.65.1-noble
+
+# Point all repos to security.ubuntu.com (which is whitelisted by campus/institutional network gateways)
+RUN sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
+    sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list 2>/dev/null || \
+    sed -i 's|http://archive.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
+    sed -i 's|http://archive.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list 2>/dev/null || true
+
+# Install network utilities, packet capture tools, and tc-netem
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 \
+    tcpdump \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /testbed
+
+# Install Python requirements
+RUN pip install --no-cache-dir playwright dpkt pandas numpy
+
+# Copy runner script
+COPY scripts/testbed_runner.py /testbed/scripts/testbed_runner.py
+
+ENTRYPOINT ["python", "/testbed/scripts/testbed_runner.py"]
