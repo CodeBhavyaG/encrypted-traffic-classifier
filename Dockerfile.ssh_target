@@ -1,0 +1,15 @@
+FROM alpine:3.20
+
+# Throwaway SSH target for capturing remote_access persona traffic.
+# NOT a production image: password auth enabled with a test-only account.
+RUN apk add --no-cache openssh && \
+    ssh-keygen -A && \
+    sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config && \
+    echo "PermitOpen any" >> /etc/ssh/sshd_config && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "Subsystem sftp internal-sftp" >> /etc/ssh/sshd_config && \
+    echo "root:research" | chpasswd && \
+    mkdir -p /tmp
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

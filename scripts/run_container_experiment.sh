@@ -10,7 +10,7 @@
 # Examples:
 #   ./scripts/run_container_experiment.sh streaming wifi_home 1 45
 #   ./scripts/run_container_experiment.sh streaming mobile_hotspot 1 45
-#   ./scripts/run_container_experiment.sh video_call mobile_hotspot 1 45
+#   ./scripts/run_container_experiment.sh remote_access mobile_hotspot 1 45
 #   ./scripts/run_container_experiment.sh browsing wifi_home 1 30
 # ==============================================================================
 
@@ -21,12 +21,12 @@ NET_ENV=${2:-""}
 RUN_ID=${3:-""}
 DURATION=${4:-45}
 
-VALID_CLASSES="streaming video_call file_download browsing"
+VALID_CLASSES="streaming remote_access file_download browsing"
 VALID_NETS="wifi_home mobile_hotspot"
 
 if [[ -z "$CLASS_NAME" || -z "$NET_ENV" || -z "$RUN_ID" ]]; then
     echo "Usage: $0 <class_name> <network_env> <run_id> [duration_seconds]"
-    echo "  <class_name>:  streaming | video_call | file_download | browsing"
+    echo "  <class_name>:  streaming | remote_access | file_download | browsing"
     echo "  <network_env>: wifi_home | mobile_hotspot"
     echo "  <run_id>:      1, 2, 3, etc."
     echo "  [duration]:    Duration in seconds (default: 45)"
@@ -79,8 +79,14 @@ echo "===================================================================="
 # - Mount project datasets directory
 docker run --rm \
     --cap-add=NET_ADMIN \
+    --dns 8.8.8.8 \
+    --dns 1.1.1.1 \
     -v "$PROJECT_DIR/datasets:/testbed/datasets" \
     -v "$PROJECT_DIR/scripts/testbed_runner.py:/testbed/scripts/testbed_runner.py:ro" \
+    -e REMOTE_ACCESS_HOST \
+    -e REMOTE_ACCESS_PORT \
+    -e REMOTE_ACCESS_USER \
+    -e REMOTE_ACCESS_PASSWORD \
     "$IMAGE_NAME" \
     --class-name "$CLASS_NAME" \
     --network "$NET_ENV" \

@@ -56,8 +56,9 @@
   3. Launches the headless Chromium persona.
   4. Flushes the `.pcap` cleanly upon completion to the mounted `./datasets/raw` volume.
 - `scripts/run_container_experiment.sh`: One-command host runner that launches the Docker container with `--cap-add=NET_ADMIN` (for `tc-netem`).
-- `src/extract_features.py`: Lightning-fast bidirectional flow aggregator (`dpkt`), strips metadata, exports `datasets/processed/traffic_features.csv`.
-- `src/train_evaluate.py`: ML pipeline, cross-network generalization benchmark, confusion matrix rendering, and feature importance analysis.
+- `src/extract_features.py`: Lightning-fast bidirectional flow aggregator (`dpkt`), strips metadata, exports `datasets/processed/traffic_features.csv`. One row = one flow segment: 5-tuple split on idle gaps > `--flow-timeout` and chunked every `--chunk-size` packets, so a 20k-packet streaming session yields ~100 samples like NIMS (one row per flow), not one giant row.
+- `src/train_evaluate.py`: ML pipeline, cross-network generalization benchmark, confusion matrix rendering, and feature importance analysis. Same-network benchmark uses **out-of-fold pooled predictions over `StratifiedGroupKFold` grouped by `source_file`** — flow chunks from the same pcap never straddle train/test. A naive random split inflates accuracy via temporal leakage between sibling chunks.
+- `scripts/run_batch_campaign.sh`: One-command dataset scaler. Loops the container testbed until N pcaps exist per (class × network-env) cell, then re-extracts features. NIMS-scale datasets come from many sessions × many flows per session, not from one capture.
 
 ---
 

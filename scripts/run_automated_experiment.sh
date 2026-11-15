@@ -11,11 +11,11 @@ RUN_ID=${3:-""}
 DURATION=${4:-60}
 INTERFACE="en0"
 
-VALID_CLASSES="streaming video_call file_download browsing"
+VALID_CLASSES="streaming remote_access file_download browsing"
 
 if [[ -z "$CLASS_NAME" || -z "$NET_ENV" || -z "$RUN_ID" ]]; then
     echo "Usage: $0 <class_name> <network_env> <run_id> [duration_seconds]"
-    echo "  <class_name>:  streaming | video_call | file_download | browsing"
+    echo "  <class_name>:  streaming | remote_access | file_download | browsing"
     echo "  <network_env>: wifi_home | mobile_hotspot"
     echo "  <run_id>:      1, 2, 3, etc."
     echo "  [duration]:    Duration in seconds (default: 60)"

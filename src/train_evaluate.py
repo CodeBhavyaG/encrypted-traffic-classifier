@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
@@ -88,7 +88,7 @@ def save_confusion_matrix(cm, class_names, title, output_path):
     """Renders and saves a high-resolution confusion matrix plot."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fig, ax = plt.subplots(figsize=(7, 6))
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[c for i, c in enumerate(class_names) if i < cm.shape[0]])
     disp.plot(cmap=plt.cm.Blues, ax=ax, values_format="d", colorbar=False)
     ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
     plt.xticks(rotation=30, ha="right")
@@ -167,33 +167,53 @@ def run_same_network_benchmark(df, feature_cols, target_col="class_label", repor
     y = label_enc.fit_transform(y_raw)
     class_names = [str(c) for c in label_enc.classes_]
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y
-    )
+    # Group-aware split: all flow chunks from the same pcap must stay on one side.
+    # Otherwise sibling chunks of one long session leak between train and test
+    # (temporal correlation, identical burst patterns) and inflate accuracy.
+    # StratifiedGroupKFold also keeps class proportions when some classes have
+    # very few pcaps (e.g. only 2 browsing captures at this stage).
+    groups = df["source_file"].values
+    sgfk = StratifiedGroupKFold(n_splits=4, shuffle=True, random_state=42)
+    train_idx, test_idx = next(sgfk.split(X, y, groups=groups))
+    X_train, X_test, y_train, y_test = X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
     models = get_models()
     results = {}
 
+    # Out-of-fold prediction aggregation over group-aware folds: every pcap is
+    # used as test exactly once, predictions are pooled across folds. Robust for
+    # small capture counts where a single holdout can miss entire classes.
+    sgfk = StratifiedGroupKFold(n_splits=4, shuffle=True, random_state=42)
+    folds = list(sgfk.split(X, y, groups=groups))
+    all_labels = range(len(class_names))
+
     for name, model in models.items():
-        print(f"\n--> Training {name} on {len(X_train)} flow samples...")
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
+        y_true_all, y_pred_all = [], []
+        final_model = None
+        for train_idx, test_idx in folds:
+            m = model
+            m.fit(X[train_idx], y[train_idx])
+            y_true_all.append(y[test_idx])
+            y_pred_all.append(m.predict(X[test_idx]))
+            final_model = m
+        y_true_all = np.concatenate(y_true_all)
+        y_pred_all = np.concatenate(y_pred_all)
 
-        print(f"\n[Classification Report: {name}]")
-        print(classification_report(y_test, y_pred, target_names=class_names, digits=4))
+        print(f"\n[Classification Report: {name}] (out-of-fold, leave-pcap-out pooled)")
+        print(classification_report(y_true_all, y_pred_all, labels=all_labels, target_names=class_names, digits=4, zero_division=0))
 
-        cm = confusion_matrix(y_test, y_pred)
+        cm = confusion_matrix(y_true_all, y_pred_all, labels=all_labels)
         cm_filename = f"cm_same_network_{name.lower().replace(' ', '_').replace('(', '').replace(')', '')}.png"
         save_confusion_matrix(
             cm, class_names,
-            title=f"Confusion Matrix: {name} (Same-Network Holdout)",
+            title=f"Confusion Matrix: {name} (Out-of-Fold, Group-Aware)",
             output_path=os.path.join(reports_dir, cm_filename)
         )
 
         results[name] = {
-            "model": model,
-            "y_pred": y_pred,
-            "y_test": y_test,
+            "model": final_model,
+            "y_pred": y_pred_all,
+            "y_test": y_true_all,
             "cm": cm
         }
 
@@ -202,8 +222,8 @@ def run_same_network_benchmark(df, feature_cols, target_col="class_label", repor
         analyze_feature_importance(
             results["Random Forest"]["model"],
             feature_cols,
-            X_test,
-            y_test,
+            X,
+            y,
             output_dir=reports_dir
         )
 
@@ -264,7 +284,7 @@ def run_cross_network_generalization(df, feature_cols, target_col="class_label",
     rf_rev.fit(X_test, y_test)
     y_pred_rev = rf_rev.predict(X_train)
 
-    print(classification_report(y_train, y_pred_rev, target_names=class_names, digits=4, zero_division=0))
+    print(classification_report(y_train, y_pred_rev, labels=range(len(class_names)), target_names=class_names, digits=4, zero_division=0))
     cm_rev = confusion_matrix(y_train, y_pred_rev)
     save_confusion_matrix(
         cm_rev, class_names,
@@ -280,7 +300,7 @@ def generate_synthetic_demo_dataset(output_csv="datasets/processed/demo_traffic_
     to validate the ML pipeline before live captures are finished.
     """
     np.random.seed(42)
-    classes = ["streaming", "video_call", "file_download", "browsing"]
+    classes = ["streaming", "remote_access", "file_download", "browsing"]
     networks = ["wifi_home", "mobile_hotspot"]
     rows = []
 
@@ -303,17 +323,19 @@ def generate_synthetic_demo_dataset(output_csv="datasets/processed/demo_traffic_
                     is_udp = 0 if np.random.rand() > 0.3 else 1 # TCP HTTPS or QUIC
                     iat_mean = duration / max(tot_pkts, 1)
 
-                elif cls == "video_call":
-                    # Video conference: symmetric packet rate, steady 20-30ms IAT, UDP dominant
-                    tot_pkts = int(np.random.normal(loc=1200, scale=150))
-                    fwd_pct = np.random.uniform(0.42, 0.52)
+                elif cls == "remote_access":
+                    # SSH remote administration: small keystroke packets uplink,
+                    # intermittent command-output bursts downlink, long human
+                    # think-time gaps, occasional SFTP bulk bursts, TCP only.
+                    tot_pkts = int(np.random.gamma(shape=8, scale=25))
+                    fwd_pct = np.random.uniform(0.45, 0.65)
                     fwd_pkts = int(tot_pkts * fwd_pct)
                     bwd_pkts = tot_pkts - fwd_pkts
-                    bwd_len_mean = np.random.uniform(600, 950)
-                    fwd_len_mean = np.random.uniform(500, 850)
-                    duration = 60.0
-                    is_udp = 1 # RTP / UDP dominant
-                    iat_mean = np.random.normal(loc=0.025 + rtt_base, scale=0.005)
+                    bwd_len_mean = np.random.uniform(90, 400)   # keystrokes + small echoes
+                    fwd_len_mean = np.random.uniform(70, 180)   # single-char/line packets
+                    duration = np.random.uniform(30, 120)
+                    is_udp = 0  # SSH is TCP/22
+                    iat_mean = np.random.exponential(scale=1.5) + rtt_base  # think-time gaps
 
                 elif cls == "file_download":
                     # File download: extreme asymmetry, bulk MTU packets (1400-1500 bytes), minimal IAT

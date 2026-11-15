@@ -61,7 +61,7 @@ def is_local_or_multicast(ip_str):
     return False
 
 
-def extract_flows_from_pcap(pcap_path, min_packets=5, flow_timeout=120.0):
+def extract_flows_from_pcap(pcap_path, min_packets=5, flow_timeout=120.0, chunk_size=200):
     """
     Reads a .pcap file using dpkt and groups IP packets into bidirectional flows.
     
@@ -138,26 +138,46 @@ def extract_flows_from_pcap(pcap_path, min_packets=5, flow_timeout=120.0):
         print(f"[-] Error reading {pcap_path}: {e}", file=sys.stderr)
         return []
 
-    # Filter flows by minimum packet count to discard transient scans/aborted handshakes
+    # Segment each 5-tuple session into analysis flows:
+    # - Split on idle gaps > flow_timeout (the previously dead parameter; NIMS-style
+    #   flow expiry, e.g. 120s idle means the session continues in a new TCP connection)
+    # - Chunk long-lived flows every chunk_size packets so a 20k-packet stream yields
+    #   many independent samples instead of one giant row
     valid_flows = []
     for (src_ip, src_port, dst_ip, dst_port, proto), packets in flows.items():
-        if len(packets) >= min_packets:
-            valid_flows.append((proto, packets))
+        segments = []
+        current = [packets[0]]
+        for pkt in packets[1:]:
+            if current and pkt[0] - current[-1][0] > flow_timeout:
+                segments.append(current)
+                current = [pkt]
+            else:
+                current.append(pkt)
+            if len(current) >= chunk_size:
+                segments.append(current)
+                current = []
+        if current:
+            segments.append(current)
+
+        for seg in segments:
+            if len(seg) >= min_packets:
+                valid_flows.append((proto, seg))
 
     return valid_flows
 
 
 def compute_statistical_features(proto, packets):
     """
-    Computes invariant statistical metadata features for a bidirectional flow.
-    DOES NOT store IP addresses, ports, or absolute timestamps.
+    Computes statistical network traffic features matching the NIMS format.
+    Times are measured in microseconds (integer). Packet lengths and counts are integers.
     """
     timestamps = [p[0] for p in packets]
     lengths = [p[1] for p in packets]
     directions = [p[2] for p in packets]
 
-    # Flow Duration
-    duration = max(timestamps[-1] - timestamps[0], 0.0)
+    # Flow Duration in microseconds (int)
+    duration_sec = max(timestamps[-1] - timestamps[0], 0.0)
+    duration_us = int(round(duration_sec * 1e6))
 
     # Direction subsets
     fwd_lens = [l for l, d in zip(lengths, directions) if d == "fwd"]
@@ -166,117 +186,73 @@ def compute_statistical_features(proto, packets):
     fwd_ts = [t for t, d in zip(timestamps, directions) if d == "fwd"]
     bwd_ts = [t for t, d in zip(timestamps, directions) if d == "bwd"]
 
-    total_pkts = len(packets)
-    fwd_pkts = len(fwd_lens)
-    bwd_pkts = len(bwd_lens)
+    total_fpackets = len(fwd_lens)
+    total_bpackets = len(bwd_lens)
+    total_fvolume = int(sum(fwd_lens))
+    total_bvolume = int(sum(bwd_lens))
 
-    total_bytes = sum(lengths)
-    fwd_bytes = sum(fwd_lens)
-    bwd_bytes = sum(bwd_lens)
+    # Forward Packet Length Statistics
+    if fwd_lens:
+        min_fpktl = int(np.min(fwd_lens))
+        mean_fpktl = int(round(float(np.mean(fwd_lens))))
+        max_fpktl = int(np.max(fwd_lens))
+        std_fpktl = int(round(float(np.std(fwd_lens))))
+    else:
+        min_fpktl, mean_fpktl, max_fpktl, std_fpktl = -1, -1, -1, 0
 
-    # Ratios (safe against zero-division)
-    pkt_ratio = fwd_pkts / (bwd_pkts + 1)
-    byte_ratio = fwd_bytes / (bwd_bytes + 1)
-    fwd_pkt_pct = fwd_pkts / total_pkts if total_pkts > 0 else 0.0
-    fwd_byte_pct = fwd_bytes / total_bytes if total_bytes > 0 else 0.0
+    # Backward Packet Length Statistics (-1 if 0 packets, matching NIMS)
+    if bwd_lens:
+        min_bpktl = int(np.min(bwd_lens))
+        mean_bpktl = int(round(float(np.mean(bwd_lens))))
+        max_bpktl = int(np.max(bwd_lens))
+        std_bpktl = int(round(float(np.std(bwd_lens))))
+    else:
+        min_bpktl, mean_bpktl, max_bpktl, std_bpktl = -1, -1, -1, 0
 
-    # Rates
-    effective_dur = max(duration, 0.001)
-    pkt_rate = total_pkts / effective_dur
-    byte_rate = total_bytes / effective_dur
-
-    # Packet Length Summary Stats (Bi-directional)
-    pkt_len_min = float(np.min(lengths))
-    pkt_len_max = float(np.max(lengths))
-    pkt_len_mean = float(np.mean(lengths))
-    pkt_len_std = float(np.std(lengths))
-    pkt_len_median = float(np.median(lengths))
-    pkt_len_q25 = float(np.percentile(lengths, 25))
-    pkt_len_q75 = float(np.percentile(lengths, 75))
-
-    # Forward Packet Length Stats
-    fwd_len_min = float(np.min(fwd_lens)) if fwd_lens else 0.0
-    fwd_len_max = float(np.max(fwd_lens)) if fwd_lens else 0.0
-    fwd_len_mean = float(np.mean(fwd_lens)) if fwd_lens else 0.0
-    fwd_len_std = float(np.std(fwd_lens)) if fwd_lens else 0.0
-
-    # Backward Packet Length Stats
-    bwd_len_min = float(np.min(bwd_lens)) if bwd_lens else 0.0
-    bwd_len_max = float(np.max(bwd_lens)) if bwd_lens else 0.0
-    bwd_len_mean = float(np.mean(bwd_lens)) if bwd_lens else 0.0
-    bwd_len_std = float(np.std(bwd_lens)) if bwd_lens else 0.0
-
-    # Inter-Arrival Times (IAT)
-    def calc_iats(ts_list):
+    # Inter-Arrival Times (IAT) in microseconds (int)
+    def calc_iats_us(ts_list):
         if len(ts_list) < 2:
-            return 0.0, 0.0, 0.0, 0.0
-        diffs = np.diff(ts_list)
-        return float(np.min(diffs)), float(np.max(diffs)), float(np.mean(diffs)), float(np.std(diffs))
+            return 0, 0, 0, 0
+        diffs_us = np.diff(ts_list) * 1e6
+        min_iat = int(round(float(np.min(diffs_us))))
+        mean_iat = int(round(float(np.mean(diffs_us))))
+        max_iat = int(round(float(np.max(diffs_us))))
+        std_iat = int(round(float(np.std(diffs_us))))
+        return min_iat, mean_iat, max_iat, std_iat
 
-    iat_min, iat_max, iat_mean, iat_std = calc_iats(timestamps)
-    fwd_iat_min, fwd_iat_max, fwd_iat_mean, fwd_iat_std = calc_iats(fwd_ts)
-    bwd_iat_min, bwd_iat_max, bwd_iat_mean, bwd_iat_std = calc_iats(bwd_ts)
-
-    # Initial Burst Profile (First 5 packet lengths average)
-    init_burst_len_mean = float(np.mean(lengths[:min(5, len(lengths))]))
+    min_fiat, mean_fiat, max_fiat, std_fiat = calc_iats_us(fwd_ts)
+    min_biat, mean_biat, max_biat, std_biat = calc_iats_us(bwd_ts)
 
     features = {
-        # Protocol Indicator (1 = UDP, 0 = TCP)
-        "is_udp": 1 if proto == dpkt.ip.IP_PROTO_UDP else 0,
-        # Duration & Rates
-        "duration": duration,
-        "pkt_rate": pkt_rate,
-        "byte_rate": byte_rate,
-        # Volumes & Counts
-        "tot_packets": total_pkts,
-        "fwd_packets": fwd_pkts,
-        "bwd_packets": bwd_pkts,
-        "tot_bytes": total_bytes,
-        "fwd_bytes": fwd_bytes,
-        "bwd_bytes": bwd_bytes,
-        # Directional Ratios
-        "pkt_ratio": pkt_ratio,
-        "byte_ratio": byte_ratio,
-        "fwd_pkt_pct": fwd_pkt_pct,
-        "fwd_byte_pct": fwd_byte_pct,
-        # Overall Packet Length Statistics
-        "pkt_len_min": pkt_len_min,
-        "pkt_len_max": pkt_len_max,
-        "pkt_len_mean": pkt_len_mean,
-        "pkt_len_std": pkt_len_std,
-        "pkt_len_median": pkt_len_median,
-        "pkt_len_q25": pkt_len_q25,
-        "pkt_len_q75": pkt_len_q75,
-        # Fwd / Bwd Packet Length Statistics
-        "fwd_len_min": fwd_len_min,
-        "fwd_len_max": fwd_len_max,
-        "fwd_len_mean": fwd_len_mean,
-        "fwd_len_std": fwd_len_std,
-        "bwd_len_min": bwd_len_min,
-        "bwd_len_max": bwd_len_max,
-        "bwd_len_mean": bwd_len_mean,
-        "bwd_len_std": bwd_len_std,
-        # Inter-Arrival Times
-        "iat_min": iat_min,
-        "iat_max": iat_max,
-        "iat_mean": iat_mean,
-        "iat_std": iat_std,
-        "fwd_iat_min": fwd_iat_min,
-        "fwd_iat_max": fwd_iat_max,
-        "fwd_iat_mean": fwd_iat_mean,
-        "fwd_iat_std": fwd_iat_std,
-        "bwd_iat_min": bwd_iat_min,
-        "bwd_iat_max": bwd_iat_max,
-        "bwd_iat_mean": bwd_iat_mean,
-        "bwd_iat_std": bwd_iat_std,
-        # Handshake / Initial Burst
-        "init_burst_len_mean": init_burst_len_mean
+        "min_fpktl": min_fpktl,
+        "mean_fpktl": mean_fpktl,
+        "max_fpktl": max_fpktl,
+        "std_fpktl": std_fpktl,
+        "min_bpktl": min_bpktl,
+        "mean_bpktl": mean_bpktl,
+        "max_bpktl": max_bpktl,
+        "std_bpktl": std_bpktl,
+        "min_fiat": min_fiat,
+        "mean_fiat": mean_fiat,
+        "max_fiat": max_fiat,
+        "std_fiat": std_fiat,
+        "min_biat": min_biat,
+        "mean_biat": mean_biat,
+        "max_biat": max_biat,
+        "std_biat": std_biat,
+        "duration": duration_us,
+        "proto": int(proto),
+        "total_fpackets": total_fpackets,
+        "total_fvolume": total_fvolume,
+        "total_bpackets": total_bpackets,
+        "total_bvolume": total_bvolume
     }
 
     return features
 
 
-def process_dataset(raw_dir="datasets/raw", output_csv="datasets/processed/traffic_features.csv", min_packets=5):
+def process_dataset(raw_dir="datasets/raw", output_csv="datasets/processed/traffic_features.csv", min_packets=5,
+                    flow_timeout=120.0, chunk_size=200):
     """Walks through raw directory, extracts flows, and saves to CSV."""
     pcap_files = glob.glob(f"{raw_dir}/**/*.pcap", recursive=True)
     if not pcap_files:
@@ -285,33 +261,42 @@ def process_dataset(raw_dir="datasets/raw", output_csv="datasets/processed/traff
 
     print(f"[*] Found {len(pcap_files)} .pcap files. Extracting bidirectional flows...")
     all_rows = []
+    flow_id = 1
 
     for idx, pcap_path in enumerate(pcap_files, 1):
         class_name, net_env, run_id = parse_filename_metadata(pcap_path)
-        valid_flows = extract_flows_from_pcap(pcap_path, min_packets=min_packets)
+        valid_flows = extract_flows_from_pcap(
+            pcap_path, min_packets=min_packets, flow_timeout=flow_timeout, chunk_size=chunk_size
+        )
         print(f" [{idx}/{len(pcap_files)}] {os.path.basename(pcap_path)} -> Class: {class_name}, Env: {net_env}, Flows: {len(valid_flows)}")
 
         for proto, packets in valid_flows:
             row = compute_statistical_features(proto, packets)
-            # Add metadata labels
-            row["class_label"] = class_name
-            row["network_env"] = net_env
-            row["run_id"] = run_id
-            row["source_file"] = os.path.basename(pcap_path)
+            row["id"] = flow_id
+            row["class"] = class_name
+            flow_id += 1
             all_rows.append(row)
 
     if not all_rows:
         print("[!] No valid flows met the threshold filter.")
         return None
 
-    df = pd.DataFrame(all_rows)
+    # Exact column ordering matching NIMS
+    nims_columns = [
+        "id", "min_fpktl", "mean_fpktl", "max_fpktl", "std_fpktl",
+        "min_bpktl", "mean_bpktl", "max_bpktl", "std_bpktl",
+        "min_fiat", "mean_fiat", "max_fiat", "std_fiat",
+        "min_biat", "mean_biat", "max_biat", "std_biat",
+        "duration", "proto", "total_fpackets", "total_fvolume",
+        "total_bpackets", "total_bvolume", "class"
+    ]
+
+    df = pd.DataFrame(all_rows)[nims_columns]
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     df.to_csv(output_csv, index=False)
     print(f"\n[+] Successfully saved {len(df)} flow samples to: {output_csv}")
     print("\nClass distribution in extracted dataset:")
-    print(df["class_label"].value_counts())
-    print("\nNetwork environment distribution:")
-    print(df["network_env"].value_counts())
+    print(df["class"].value_counts())
     return df
 
 
@@ -320,6 +305,9 @@ if __name__ == "__main__":
     parser.add_argument("--raw-dir", default="datasets/raw", help="Directory containing raw .pcap traces")
     parser.add_argument("--output", default="datasets/processed/traffic_features.csv", help="Output CSV path")
     parser.add_argument("--min-packets", type=int, default=5, help="Minimum packets per flow to retain")
+    parser.add_argument("--flow-timeout", type=float, default=120.0, help="Idle gap (s) that splits a session into separate flows")
+    parser.add_argument("--chunk-size", type=int, default=200, help="Max packets per flow sample (long flows are chunked into multiple samples)")
     args = parser.parse_args()
 
-    process_dataset(raw_dir=args.raw_dir, output_csv=args.output, min_packets=args.min_packets)
+    process_dataset(raw_dir=args.raw_dir, output_csv=args.output, min_packets=args.min_packets,
+                    flow_timeout=args.flow_timeout, chunk_size=args.chunk_size)
