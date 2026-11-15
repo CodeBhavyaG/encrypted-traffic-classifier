@@ -192,32 +192,35 @@ def compute_statistical_features(proto, packets):
     total_bvolume = int(sum(bwd_lens))
 
     # Forward Packet Length Statistics
+    # Forward Packet Length Statistics (0 if 0 packets)
     if fwd_lens:
         min_fpktl = int(np.min(fwd_lens))
         mean_fpktl = int(round(float(np.mean(fwd_lens))))
         max_fpktl = int(np.max(fwd_lens))
         std_fpktl = int(round(float(np.std(fwd_lens))))
     else:
-        min_fpktl, mean_fpktl, max_fpktl, std_fpktl = -1, -1, -1, 0
+        min_fpktl, mean_fpktl, max_fpktl, std_fpktl = 0, 0, 0, 0
 
-    # Backward Packet Length Statistics (-1 if 0 packets, matching NIMS)
+    # Backward Packet Length Statistics (0 if 0 packets)
     if bwd_lens:
         min_bpktl = int(np.min(bwd_lens))
         mean_bpktl = int(round(float(np.mean(bwd_lens))))
         max_bpktl = int(np.max(bwd_lens))
         std_bpktl = int(round(float(np.std(bwd_lens))))
     else:
-        min_bpktl, mean_bpktl, max_bpktl, std_bpktl = -1, -1, -1, 0
+        min_bpktl, mean_bpktl, max_bpktl, std_bpktl = 0, 0, 0, 0
 
     # Inter-Arrival Times (IAT) in microseconds (int)
     def calc_iats_us(ts_list):
         if len(ts_list) < 2:
             return 0, 0, 0, 0
-        diffs_us = np.diff(ts_list) * 1e6
+        sorted_ts = sorted(ts_list)
+        diffs_us = np.maximum(np.diff(sorted_ts) * 1e6, 0.0)
         min_iat = int(round(float(np.min(diffs_us))))
         mean_iat = int(round(float(np.mean(diffs_us))))
         max_iat = int(round(float(np.max(diffs_us))))
         std_iat = int(round(float(np.std(diffs_us))))
+        return min_iat, mean_iat, max_iat, std_iat
         return min_iat, mean_iat, max_iat, std_iat
 
     min_fiat, mean_fiat, max_fiat, std_fiat = calc_iats_us(fwd_ts)
