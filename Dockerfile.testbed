@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /testbed
 
 # Install Python requirements
-RUN pip install --no-cache-dir playwright==1.65.1 dpkt pandas numpy paramiko
+RUN pip install --no-cache-dir playwright==1.65.1 dpkt pandas numpy paramiko dnspython scp
 
 # Copy runner script
 COPY scripts/testbed_runner.py /testbed/scripts/testbed_runner.py

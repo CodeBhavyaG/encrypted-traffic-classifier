@@ -1,15 +1,79 @@
 FROM alpine:3.20
 
-# Throwaway SSH target for capturing remote_access persona traffic.
-# NOT a production image: password auth enabled with a test-only account.
-RUN apk add --no-cache openssh && \
+# Multi-service target for modern encrypted protocol capture:
+# - OpenSSH (SSH-shell, SCP, SFTP, SSH-localForward, SSH-remoteForward, SSH-x11)
+# - vsftpd with TLS (FTPS)
+# - stunnel + busybox telnetd (TLS-Telnet on port 992)
+# - socat / test backends
+
+RUN apk add --no-cache openssh vsftpd stunnel busybox-extras openssl socat && \
     ssh-keygen -A && \
     sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#*X11Forwarding.*/X11Forwarding yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#*X11UseLocalhost.*/X11UseLocalhost no/' /etc/ssh/sshd_config && \
     echo "PermitOpen any" >> /etc/ssh/sshd_config && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
     echo "Subsystem sftp internal-sftp" >> /etc/ssh/sshd_config && \
     echo "root:research" | chpasswd && \
-    mkdir -p /tmp
+    adduser -D -h /home/research research && \
+    echo "research:research" | chpasswd && \
+    mkdir -p /tmp /etc/ssl/local && \
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+      -keyout /etc/ssl/local/target.key -out /etc/ssl/local/target.crt \
+      -subj "/CN=research-target/O=Research/C=US" && \
+    cat /etc/ssl/local/target.key /etc/ssl/local/target.crt > /etc/ssl/local/target.pem
 
-EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D", "-e"]
+# Configure vsftpd for explicit/implicit TLS
+RUN cat <<'EOF' > /etc/vsftpd/vsftpd.conf
+listen=YES
+listen_port=21
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+ssl_enable=YES
+allow_anon_ssl=NO
+force_local_data_ssl=YES
+force_local_logins_ssl=YES
+ssl_tlsv1_2=YES
+rsa_cert_file=/etc/ssl/local/target.crt
+rsa_private_key_file=/etc/ssl/local/target.key
+pasv_enable=YES
+pasv_min_port=21100
+pasv_max_port=21110
+seccomp_sandbox=NO
+EOF
+
+# Configure stunnel for TLS-Telnet (wrapping telnetd localhost:2323 to port 992)
+RUN cat <<'EOF' > /etc/stunnel/stunnel.conf
+cert = /etc/ssl/local/target.pem
+foreground = yes
+[telnet-tls]
+accept = 992
+connect = 127.0.0.1:2323
+EOF
+
+# Startup script to run sshd, vsftpd, telnetd, stunnel
+RUN cat <<'EOF' > /entrypoint.sh
+#!/bin/sh
+set -e
+
+# Start SSH daemon in background
+/usr/sbin/sshd
+
+# Start local telnet daemon (listening on localhost:2323 only)
+busybox-extras telnetd -p 2323 -l /bin/sh &
+
+# Start vsftpd in background
+/usr/sbin/vsftpd /etc/vsftpd/vsftpd.conf &
+
+# Start a small local HTTP echo server on port 8080 for port-forwarding targets
+socat TCP-LISTEN:8080,fork,reuseaddr SYSTEM:"printf 'HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello Forward'" &
+
+# Run stunnel in foreground
+exec stunnel /etc/stunnel/stunnel.conf
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22 21 992 8080 21100-21110
+ENTRYPOINT ["/entrypoint.sh"]

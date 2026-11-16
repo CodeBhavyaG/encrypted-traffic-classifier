@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# run_container_experiment.sh: Fully Automated Research Testbed Launcher
+# run_container_experiment.sh: Automated Encrypted Protocol Research Testbed
 # ==============================================================================
-# ZERO manual Wi-Fi toggling. ZERO host OS noise. ZERO sudo on your Mac.
-#
 # Usage:
 #   ./scripts/run_container_experiment.sh <class_name> <network_env> <run_id> [duration_seconds]
 #
-# Examples:
-#   ./scripts/run_container_experiment.sh streaming wifi_home 1 45
-#   ./scripts/run_container_experiment.sh streaming mobile_hotspot 1 45
-#   ./scripts/run_container_experiment.sh remote_access mobile_hotspot 1 45
-#   ./scripts/run_container_experiment.sh browsing wifi_home 1 30
+# Supported Modern Encrypted Classes (Option B):
+#   HTTPS | DoT | SSH-shell | SCP | SFTP | SSH-localForward |
+#   SSH-remoteForward | SSH-x11 | FTPS | TLS-Telnet | Encrypted-P2P
 # ==============================================================================
 
 set -euo pipefail
@@ -19,17 +15,17 @@ set -euo pipefail
 CLASS_NAME=${1:-""}
 NET_ENV=${2:-""}
 RUN_ID=${3:-""}
-DURATION=${4:-45}
+DURATION=${4:-30}
 
-VALID_CLASSES="streaming remote_access file_download browsing"
+VALID_CLASSES="HTTPS DoT SSH-shell SCP SFTP SSH-localForward SSH-remoteForward SSH-x11 FTPS TLS-Telnet Encrypted-P2P"
 VALID_NETS="wifi_home mobile_hotspot"
 
 if [[ -z "$CLASS_NAME" || -z "$NET_ENV" || -z "$RUN_ID" ]]; then
     echo "Usage: $0 <class_name> <network_env> <run_id> [duration_seconds]"
-    echo "  <class_name>:  streaming | remote_access | file_download | browsing"
+    echo "  <class_name>:  $VALID_CLASSES"
     echo "  <network_env>: wifi_home | mobile_hotspot"
     echo "  <run_id>:      1, 2, 3, etc."
-    echo "  [duration]:    Duration in seconds (default: 45)"
+    echo "  [duration]:    Duration in seconds (default: 30)"
     exit 1
 fi
 
@@ -47,13 +43,35 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 IMAGE_NAME="traffic-testbed:latest"
+TARGET_IMAGE="traffic-target:latest"
+NET_NAME="testbed-net"
 
-# 1. Build testbed image if not already built
+# 1. Create Docker bridge network if not exists
+if ! docker network inspect "$NET_NAME" > /dev/null 2>&1; then
+    docker network create "$NET_NAME" > /dev/null
+fi
+
+# 2. Build multi-service target image if not built
+if ! docker image inspect "$TARGET_IMAGE" > /dev/null 2>&1; then
+    echo "[*] Building multi-protocol encrypted target server image ($TARGET_IMAGE)..."
+    docker build -t "$TARGET_IMAGE" -f Dockerfile.ssh_target .
+fi
+
+# 3. Ensure target server container is running
+TARGET_CONTAINER="research-target-server"
+if ! docker ps --format '{{.Names}}' | grep -q "^${TARGET_CONTAINER}$"; then
+    docker rm -f "$TARGET_CONTAINER" 2>/dev/null || true
+    echo "[*] Launching research target server container on $NET_NAME..."
+    docker run -d --rm \
+        --name "$TARGET_CONTAINER" \
+        --network "$NET_NAME" \
+        "$TARGET_IMAGE" > /dev/null
+    sleep 2
+fi
+
+# 4. Build testbed runner image if needed
 if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
-    echo "===================================================================="
-    echo "[*] Building contained research testbed image ($IMAGE_NAME)..."
-    echo "    (This only happens once)"
-    echo "===================================================================="
+    echo "[*] Building testbed image ($IMAGE_NAME)..."
     docker build -t "$IMAGE_NAME" -f Dockerfile.testbed .
 fi
 
@@ -65,7 +83,7 @@ HOST_PCAP="datasets/raw/${CLASS_NAME}/${FILENAME}"
 mkdir -p "datasets/raw/${CLASS_NAME}"
 
 echo "===================================================================="
-echo "  RESEARCH TESTBED: FULLY AUTOMATED ISOLATED EXECUTION"
+echo "  RESEARCH TESTBED: ENCRYPTED PROTOCOL CAPTURE"
 echo "===================================================================="
 echo " Target Class      : $CLASS_NAME"
 echo " Virtual Network   : $NET_ENV (emulated via Linux tc-netem on eth0)"
@@ -74,19 +92,17 @@ echo " Duration          : ${DURATION}s"
 echo " Output Destination: $HOST_PCAP"
 echo "===================================================================="
 
-# Run container with:
-# - --cap-add=NET_ADMIN: allows tc-netem to manipulate virtual eth0
-# - Mount project datasets directory
 docker run --rm \
+    --network "$NET_NAME" \
     --cap-add=NET_ADMIN \
     --dns 8.8.8.8 \
     --dns 1.1.1.1 \
     -v "$PROJECT_DIR/datasets:/testbed/datasets" \
     -v "$PROJECT_DIR/scripts/testbed_runner.py:/testbed/scripts/testbed_runner.py:ro" \
-    -e REMOTE_ACCESS_HOST \
-    -e REMOTE_ACCESS_PORT \
-    -e REMOTE_ACCESS_USER \
-    -e REMOTE_ACCESS_PASSWORD \
+    -e REMOTE_ACCESS_HOST="$TARGET_CONTAINER" \
+    -e REMOTE_ACCESS_PORT=22 \
+    -e REMOTE_ACCESS_USER=research \
+    -e REMOTE_ACCESS_PASSWORD=research \
     "$IMAGE_NAME" \
     --class-name "$CLASS_NAME" \
     --network "$NET_ENV" \
@@ -99,13 +115,11 @@ if [[ -f "$HOST_PCAP" ]]; then
 
     LOG_FILE="metadata/experiment_log.csv"
     if [[ ! -f "$LOG_FILE" ]]; then
+        mkdir -p metadata
         echo "timestamp,class_name,network_env,run_id,duration_seconds,file_name,file_size" > "$LOG_FILE"
     fi
     echo "$TIMESTAMP,$CLASS_NAME,$NET_ENV,$RUN_ID,$DURATION,$FILENAME,$FILE_SIZE" >> "$LOG_FILE"
     echo "[+] Logged run in $LOG_FILE"
-    echo "===================================================================="
-    echo "  RUN #$RUN_ID COMPLETED (ZERO MANUAL TOGGLING NEEDED!)"
-    echo "===================================================================="
 else
     echo "[-] Error: PCAP trace was not found at $HOST_PCAP"
     exit 1

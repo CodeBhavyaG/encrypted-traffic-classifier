@@ -8,11 +8,20 @@
 
 ---
 
-## 2. Target Classes (The 4 Applications)
-1. `streaming`: Video Streaming (HD video playback, DASH/HLS chunk buffering bursts).
-2. `video_call`: Video Conferencing (WebRTC bidirectional audio/video duplex, steady ~20ms interval, UDP/SRTP dominant).
-3. `file_download`: High-throughput asset/file download (MTU saturation ~1450-1500 bytes, heavy downlink asymmetry).
-4. `browsing`: Interactive web browsing (stochastic human think-time, scrolling, internal page transitions).
+## 2. Target Classes (11 Modern Encrypted Applications - Option B)
+Aligned with the classic NIMS protocol taxonomy, but updated to 100% modern encrypted protocols:
+
+1. `HTTPS`: Interactive encrypted web browsing and API requests (TLS 1.3 / HTTP/2 over TCP/443).
+2. `DoT`: Encrypted DNS queries over TLS (DNS-over-TLS, RFC 7858, TCP/853).
+3. `SSH-shell`: Interactive remote terminal console over SSH (keystrokes and command bursts, TCP/22).
+4. `SCP`: Secure file copy protocol over SSH (bulk encrypted file transfer, TCP/22).
+5. `SFTP`: Secure File Transfer Protocol subsystem over SSH (binary chunked reads/writes, TCP/22).
+6. `SSH-localForward`: SSH local port forwarding tunnel (`ssh -L`, TCP/22).
+7. `SSH-remoteForward`: SSH reverse port forwarding tunnel (`ssh -R`, TCP/22).
+8. `SSH-x11`: X11 graphical display packet forwarding over SSH (`ssh -X`, TCP/22).
+9. `FTPS`: FTP over TLS/SSL (encrypted control and data channels, TCP/990 or AUTH TLS on TCP/21).
+10. `TLS-Telnet`: Telnet over TLS/SSL (encrypted interactive terminal sessions, TCP/992).
+11. `Encrypted-P2P`: Encrypted P2P peer exchange / DHT traffic (P2P protocol with encrypted stream payload, UDP/TCP).
 
 ---
 

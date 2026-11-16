@@ -19,7 +19,7 @@ RUN_ID=${3:-""}
 DURATION=${4:-60}
 INTERFACE="en0"
 
-VALID_CLASSES="streaming remote_access file_download browsing"
+VALID_CLASSES="HTTPS DoT SSH-shell SCP SFTP SSH-localForward SSH-remoteForward SSH-x11 FTPS TLS-Telnet Encrypted-P2P"
 
 if [[ -z "$CLASS_NAME" || -z "$NET_ENV" || -z "$RUN_ID" ]]; then
     echo "Usage: $0 <class_name> <network_env> <run_id> [duration_seconds]"

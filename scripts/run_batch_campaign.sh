@@ -1,36 +1,28 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# run_batch_campaign.sh: Scale up the dataset NIMS-style (one row per flow,
-# many flows per session, many sessions per class).
-#
-# Runs the fully automated container testbed in a loop until the requested
-# number of pcaps per (class, network_env) cell exists, then re-extracts
-# features into datasets/processed/traffic_features.csv.
-#
+# run_batch_campaign.sh: Scale up the 11-class modern encrypted dataset
+# ==============================================================================
 # Usage:
 #   ./scripts/run_batch_campaign.sh [runs_per_cell] [duration_seconds]
 #
-# Defaults: 10 runs per cell x 4 classes x 2 network envs = 80 captures.
-# Each run yields roughly 3-15 flows (browsing) up to 60+ (streaming/download,
-# thanks to 200-packet chunking), i.e. hundreds-to-thousands of feature rows.
+# Defaults: 5 runs per cell x 11 classes x 2 network envs = 110 captures.
 # ==============================================================================
 
 set -uo pipefail
 
-RUNS_PER_CELL=${1:-10}
-DURATION=${2:-30}
+RUNS_PER_CELL=${1:-5}
+DURATION=${2:-25}
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-CLASSES="streaming remote_access file_download browsing"
+CLASSES="HTTPS DoT SSH-shell SCP SFTP SSH-localForward SSH-remoteForward SSH-x11 FTPS TLS-Telnet Encrypted-P2P"
 NETS="wifi_home mobile_hotspot"
 
 echo "===================================================================="
-echo "  BATCH CAPTURE CAMPAIGN"
+echo "  BATCH CAPTURE CAMPAIGN (11 MODERN ENCRYPTED PROTOCOL CLASSES)"
 echo "  Target: ${RUNS_PER_CELL} pcaps per (class x network) cell"
 echo "  Duration per capture: ${DURATION}s"
-echo "  Estimated wall time: ~$((RUNS_PER_CELL * 4 * 2 * (DURATION + 30)))s"
 echo "===================================================================="
 
 for CLASS_NAME in $CLASSES; do
